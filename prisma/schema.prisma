@@ -1,0 +1,970 @@
+// Carea — modular-monolith data model (PostgreSQL)
+//
+// Product split (TrueCar-style):
+// - USED marketplace: Listing.kind = USED — private + dealer sellers (buy/sell).
+// - NEW discovery: admin maintains VehicleMake → … → VehicleVariant + specs; merchandising via NewCarShowcaseItem (UPCOMING | POPULAR | NEWLY_LAUNCHED).
+// - Optional later: Listing.kind = NEW for dealer "new inventory" units — same directory linkage.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum ListingKind {
+  NEW
+  USED
+}
+
+enum ListingStatus {
+  DRAFT
+  PUBLISHED
+  RESERVED
+  SOLD
+  EXPIRED
+  ARCHIVED
+}
+
+enum ModerationStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum SellerType {
+  PRIVATE
+  DEALER
+}
+
+enum FuelType {
+  GASOLINE
+  DIESEL
+  ELECTRIC
+  HYBRID
+  PLUGIN_HYBRID
+  OTHER
+}
+
+enum TransmissionType {
+  MANUAL
+  AUTOMATIC
+  CVT
+  OTHER
+}
+
+enum BodyType {
+  SEDAN
+  SUV
+  COUPE
+  TRUCK
+  HATCHBACK
+  CONVERTIBLE
+  VAN
+  WAGON
+  OTHER
+}
+
+enum DrivetrainType {
+  FWD
+  RWD
+  AWD
+  FOUR_WD
+  OTHER
+}
+
+enum SpecDataType {
+  STRING
+  NUMBER
+  BOOLEAN
+  JSON
+}
+
+enum MediaKind {
+  IMAGE
+  VIDEO
+}
+
+enum ListingMediaRole {
+  PRIMARY
+  GALLERY
+  INTERIOR
+  EXTERIOR
+}
+
+enum BoostTier {
+  STANDARD
+  PREMIUM
+  FEATURED_HOME
+}
+
+enum OAuthProvider {
+  GOOGLE
+  APPLE
+}
+
+enum OutboxStatus {
+  PENDING
+  PUBLISHED
+  FAILED
+}
+
+/// TrueCar-style "New" discovery rails — admin merchandising on top of the vehicle directory (not classified listings).
+enum NewCarShelf {
+  UPCOMING
+  POPULAR
+  NEWLY_LAUNCHED
+}
+
+/// Product vertical for directory + listings (cars now; bikes/trucks later share same hierarchy).
+enum VehicleCategory {
+  CAR
+  MOTORCYCLE
+  TRUCK
+  VAN
+  OTHER
+}
+
+enum UsageType {
+  PERSONAL
+  RENTAL
+  FLEET
+  DEALER_DEMO
+}
+
+// ---------------------------------------------------------------------------
+// Multi-tenancy (SaaS-ready; single default tenant for marketplace launch)
+// ---------------------------------------------------------------------------
+
+model Tenant {
+  id        String   @id @default(uuid()) @db.Uuid
+  slug      String   @unique
+  name      String
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users         User[]
+  dealers       Dealer[]
+  listings      Listing[]
+  vehicleMakes  VehicleMake[]
+  newCarShowcaseItems NewCarShowcaseItem[]
+  blogPosts     BlogPost[]
+  videos        Video[]
+  faqs          Faq[]
+  deals         Deal[]
+  offers        Offer[]
+  conversations Conversation[]
+  dealerReviews  DealerReview[]
+  vehicleReviews VehicleReview[]
+  listingReviews ListingReview[]
+}
+
+// ---------------------------------------------------------------------------
+// Identity & RBAC
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String     @id @default(uuid()) @db.Uuid
+  tenantId     String?    @db.Uuid
+  tenant       Tenant?    @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  email        String     @unique
+  passwordHash String?
+  displayName  String?
+  phone        String?
+  avatarUrl    String?
+  status       UserStatus @default(ACTIVE)
+  emailVerifiedAt DateTime?
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  deletedAt    DateTime?
+
+  roles          UserRole[]
+  refreshTokens  RefreshToken[]
+  oauthAccounts  OAuthAccount[]
+  listingsOwned  Listing[]      @relation("ListingOwner")
+  listingsCreated Listing[]     @relation("ListingCreatedBy")
+  listingsUpdated Listing[]     @relation("ListingUpdatedBy")
+  moderationActions ListingModeration[]
+  auditLogs      AuditLog[]
+
+  dealer Dealer?
+
+  showcaseCreated NewCarShowcaseItem[] @relation("ShowcaseCreatedBy")
+  showcaseUpdated NewCarShowcaseItem[] @relation("ShowcaseUpdatedBy")
+
+  blogPostsWritten BlogPost[]          @relation("BlogAuthor")
+
+  offersMade     Offer[]               @relation("OfferBuyer")
+  messagesSent   Message[]             @relation("MessageSender")
+  messagesRecv   Message[]             @relation("MessageReceiver")
+  conversationsAsP1 Conversation[]     @relation("ConversationP1")
+  conversationsAsP2 Conversation[]     @relation("ConversationP2")
+
+  dealerReviewsWritten DealerReview[]
+  vehicleReviewsWritten VehicleReview[]
+  listingReviewsWritten ListingReview[]
+
+  @@index([tenantId])
+  @@index([createdAt, id])
+}
+
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  slug        String   @unique // USER | DEALER | ADMIN
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users       UserRole[]
+  permissions RolePermission[]
+}
+
+model Permission {
+  id          String   @id @default(uuid()) @db.Uuid
+  slug        String   @unique // e.g. listing:write, directory:admin
+  resource    String
+  action      String
+  description String?
+  createdAt   DateTime @default(now())
+
+  roles RolePermission[]
+}
+
+model UserRole {
+  userId String @db.Uuid
+  roleId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  assignedAt DateTime @default(now())
+
+  @@id([userId, roleId])
+  @@index([roleId])
+}
+
+model RolePermission {
+  roleId       String @db.Uuid
+  permissionId String @db.Uuid
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([permissionId])
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+  replacedBy String?   @db.Uuid
+
+  @@index([userId, expiresAt])
+}
+
+model OAuthAccount {
+  id             String        @id @default(uuid()) @db.Uuid
+  userId         String        @db.Uuid
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider       OAuthProvider
+  providerUserId String
+  email          String?
+  createdAt      DateTime      @default(now())
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Dealers (inventory & verification — ties to User with DEALER role)
+// ---------------------------------------------------------------------------
+
+model Dealer {
+  id               String    @id @default(uuid()) @db.Uuid
+  tenantId         String    @db.Uuid
+  tenant           Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ownerUserId      String    @unique @db.Uuid
+  owner            User      @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  businessName     String
+  slug             String
+  description      String?   @db.Text
+  phone            String?
+  email            String?
+  websiteUrl       String?
+  verified         Boolean   @default(false)
+  verifiedAt       DateTime?
+  responseTimeNote String? // e.g. "< 1 hour" — denormalized display
+  specialties      String[]  @default([])
+  openHours        String?
+  logoUrl          String?
+  coverImageUrl    String?
+  addressLine1     String?
+  addressLine2     String?
+  city             String?
+  region           String?
+  postalCode       String?
+  countryCode      String?   @db.Char(2)
+  latitude         Decimal?  @db.Decimal(10, 7)
+  longitude        Decimal?  @db.Decimal(10, 7)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+
+  listings Listing[]
+  reviews  DealerReview[]
+
+  @@unique([tenantId, slug])
+  @@index([tenantId, verified])
+  @@index([city, region])
+}
+
+// ---------------------------------------------------------------------------
+// Vehicle directory (normalized hierarchy + immutable spec versions)
+// ---------------------------------------------------------------------------
+
+model VehicleMake {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String?  @db.Uuid
+  tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  name      String
+  slug      String
+  logoUrl   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  models VehicleModel[]
+  faqs   Faq[]
+
+  @@unique([tenantId, slug])
+  @@index([slug])
+}
+
+model VehicleModel {
+  id        String   @id @default(uuid()) @db.Uuid
+  makeId    String   @db.Uuid
+  make      VehicleMake @relation(fields: [makeId], references: [id], onDelete: Cascade)
+  name      String
+  slug      String
+  /// Cars, motorcycles, trucks, etc. — filter directory & listings by this.
+  category  VehicleCategory @default(CAR)
+  bodyType  BodyType?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  generations VehicleGeneration[]
+
+  @@unique([makeId, slug])
+  @@index([makeId])
+  @@index([category])
+}
+
+model VehicleGeneration {
+  id        String   @id @default(uuid()) @db.Uuid
+  modelId   String   @db.Uuid
+  model     VehicleModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  name      String
+  slug      String
+  yearStart Int
+  yearEnd   Int?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  variants VehicleVariant[]
+
+  @@unique([modelId, slug])
+  @@index([modelId, yearStart])
+}
+
+model VehicleVariant {
+  id           String   @id @default(uuid()) @db.Uuid
+  generationId String   @db.Uuid
+  generation   VehicleGeneration @relation(fields: [generationId], references: [id], onDelete: Cascade)
+  name         String
+  slug         String
+  trimCode     String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  deletedAt    DateTime?
+
+  specVersions VehicleSpecVersion[]
+  listingsNew  Listing[]            @relation("ListingNewVariant")
+  showcaseItems NewCarShowcaseItem[]
+  reviews       VehicleReview[]
+  features      VehicleFeature[]
+  warranty      VehicleWarranty?
+
+  @@unique([generationId, slug])
+  @@index([generationId])
+}
+
+/// Immutable snapshot of specs for a variant; bump version for corrections (history preserved).
+model VehicleSpecVersion {
+  id          String    @id @default(uuid()) @db.Uuid
+  variantId   String    @db.Uuid
+  variant     VehicleVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  version     Int
+  label       String?
+  effectiveFrom DateTime @default(now())
+  effectiveTo   DateTime?
+  createdAt   DateTime  @default(now())
+
+  fields    VehicleSpecField[]
+  listings  Listing[]
+
+  @@unique([variantId, version])
+  @@index([variantId, effectiveFrom])
+}
+
+model VehicleSpecField {
+  id             String       @id @default(uuid()) @db.Uuid
+  specVersionId  String       @db.Uuid
+  specVersion    VehicleSpecVersion @relation(fields: [specVersionId], references: [id], onDelete: Cascade)
+  key            String       // stable key e.g. horsepower, engine_displacement
+  label          String
+  groupName      String       @default("General") // e.g. Mechanical, Dimensions, Capacity
+  unit           String?
+  sortOrder      Int          @default(0)
+  dataType       SpecDataType @default(STRING)
+  createdAt      DateTime     @default(now())
+
+  value VehicleSpecValue?
+
+  @@unique([specVersionId, key])
+  @@index([specVersionId, sortOrder])
+}
+
+model VehicleSpecValue {
+  id        String   @id @default(uuid()) @db.Uuid
+  fieldId   String   @unique @db.Uuid
+  field     VehicleSpecField @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  valueText String?  @db.Text
+  valueNum  Decimal? @db.Decimal(18, 6)
+  valueBool Boolean?
+  valueJson Json?
+}
+
+// ---------------------------------------------------------------------------
+// New car rails (admin) — homepage / research modules; not the same as used listings
+// ---------------------------------------------------------------------------
+
+model NewCarShowcaseItem {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @db.Uuid
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  vehicleVariantId String         @db.Uuid
+  vehicleVariant   VehicleVariant @relation(fields: [vehicleVariantId], references: [id], onDelete: Cascade)
+
+  shelf     NewCarShelf
+  sortOrder Int         @default(0)
+  isActive  Boolean     @default(true)
+
+  /// Card headline override (defaults to variant/model name in API if null)
+  marketingTitle    String?
+  marketingSubtitle String? @db.Text
+  heroImageUrl      String?
+
+  /// For UPCOMING — expected on-sale or reveal date
+  expectedLaunchDate DateTime?
+  /// For NEWLY_LAUNCHED — optional anchor date for "just launched" UX
+  launchHighlightAt  DateTime?
+
+  createdById String? @db.Uuid
+  createdBy   User?   @relation("ShowcaseCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedById String? @db.Uuid
+  updatedBy   User?   @relation("ShowcaseUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, vehicleVariantId, shelf])
+  @@index([tenantId, shelf, isActive, sortOrder])
+  @@index([vehicleVariantId])
+}
+
+// ---------------------------------------------------------------------------
+// Listings — primary marketplace is USED (private + dealer). kind=NEW reserved for optional dealer new stock.
+// ---------------------------------------------------------------------------
+
+model Listing {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @db.Uuid
+  tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  /// Marketplace: default USED. NEW = optional future dealer new-unit inventory (links to directory).
+  kind            ListingKind
+  status          ListingStatus   @default(DRAFT)
+  moderationStatus ModerationStatus @default(NONE)
+
+  /// When kind=NEW, vehicleVariantId should be set. For USED, optional if not in directory.
+  vehicleVariantId String? @db.Uuid
+  vehicleVariant   VehicleVariant? @relation("ListingNewVariant", fields: [vehicleVariantId], references: [id], onDelete: SetNull)
+
+  /// Snapshot of directory spec version at publish time (historical accuracy for NEW).
+  vehicleSpecVersionId String? @db.Uuid
+  vehicleSpecVersion   VehicleSpecVersion? @relation(fields: [vehicleSpecVersionId], references: [id], onDelete: SetNull)
+
+  ownerUserId String @db.Uuid
+  owner       User   @relation("ListingOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
+
+  sellerType SellerType
+  dealerId   String? @db.Uuid
+  dealer     Dealer? @relation(fields: [dealerId], references: [id], onDelete: SetNull)
+
+  title       String
+  slug        String
+  description String? @db.Text
+
+  /// Denormalized from directory model when variant linked; else set on create (USED free-form).
+  vehicleCategory VehicleCategory @default(CAR)
+
+  priceAmount   Decimal  @db.Decimal(12, 2)
+  currency      String   @default("USD") @db.Char(3)
+  originalPrice Decimal? @db.Decimal(12, 2)
+
+  year          Int?
+  mileage       Int?
+  conditionNote String?  @db.Text
+
+  fuel          FuelType?
+  transmission  TransmissionType?
+  bodyType      BodyType?
+  drivetrain    DrivetrainType?
+
+  exteriorColor String?
+  interiorColor String?
+  seats         Int?
+
+  // --- Used car history (TrueCar style) ---
+  accidentsReported Int @default(0)
+  ownerCount        Int @default(1)
+  hasServiceHistory Boolean @default(false)
+  usageType         UsageType @default(PERSONAL)
+
+  // --- Price Analysis ---
+  marketAveragePrice Decimal? @db.Decimal(12, 2)
+
+  /// Denormalized search facets (kept in sync by application / ES indexer).
+  featureTags String[] @default([])
+
+  city        String?
+  region      String?
+  countryCode String?  @db.Char(2)
+  postalCode  String?
+  latitude    Decimal? @db.Decimal(10, 7)
+  longitude   Decimal? @db.Decimal(10, 7)
+
+  publishedAt DateTime?
+  expiresAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  deletedAt DateTime?
+
+  createdById String? @db.Uuid
+  createdBy   User?   @relation("ListingCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedById String? @db.Uuid
+  updatedBy   User?   @relation("ListingUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  media        ListingMedia[]
+  attributes   ListingAttribute[]
+  moderation   ListingModeration[]
+  boosts       ListingBoost[]
+  stats        ListingStats?
+
+  deals        Deal[]
+  offers       Offer[]
+  conversations Conversation[]
+  reviews       ListingReview[]
+
+  @@unique([tenantId, slug])
+  @@index([tenantId, status, publishedAt(sort: Desc), id(sort: Asc)])
+  @@index([tenantId, kind, status])
+  @@index([tenantId, vehicleCategory, status])
+  @@index([dealerId, status])
+  @@index([vehicleVariantId])
+  @@index([city, region])
+  @@index([latitude, longitude])
+  @@index([createdAt, id])
+  @@index([priceAmount])
+}
+
+model ListingMedia {
+  id                 String           @id @default(uuid()) @db.Uuid
+  listingId          String           @db.Uuid
+  listing            Listing          @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  sortOrder          Int              @default(0)
+  kind               MediaKind        @default(IMAGE)
+  role               ListingMediaRole @default(GALLERY)
+  cloudinaryPublicId String?
+  url                String
+  width              Int?
+  height             Int?
+  createdAt          DateTime         @default(now())
+
+  @@index([listingId, sortOrder])
+}
+
+/// EAV for USED cars and long-tail attributes not in directory specs.
+model ListingAttribute {
+  id        String @id @default(uuid()) @db.Uuid
+  listingId String @db.Uuid
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  key       String
+  valueText String? @db.Text
+  valueNum  Decimal? @db.Decimal(18, 6)
+  valueBool Boolean?
+  valueJson Json?
+
+  @@unique([listingId, key])
+  @@index([listingId])
+}
+
+model ListingModeration {
+  id         String   @id @default(uuid()) @db.Uuid
+  listingId  String   @db.Uuid
+  listing    Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  reviewerId String?  @db.Uuid
+  reviewer   User?    @relation(fields: [reviewerId], references: [id], onDelete: SetNull)
+  status     ModerationStatus
+  reason     String?  @db.Text
+  createdAt  DateTime @default(now())
+
+  @@index([listingId, createdAt(sort: Desc)])
+}
+
+model ListingBoost {
+  id        String    @id @default(uuid()) @db.Uuid
+  listingId String    @db.Uuid
+  listing   Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  tier      BoostTier
+  startsAt  DateTime
+  endsAt    DateTime
+  createdAt DateTime  @default(now())
+
+  @@index([listingId, startsAt, endsAt])
+  @@index([endsAt])
+}
+
+model ListingStats {
+  listingId String  @id @db.Uuid
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  viewCount Int     @default(0)
+  clickCount Int    @default(0)
+  leadCount Int     @default(0)
+  favoriteCount Int @default(0)
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Audit & transactional outbox (CQRS / event-driven)
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  actorId    String?  @db.Uuid
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action     String
+  resource   String
+  resourceId String?
+  metadata   Json?
+  ip         String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  @@index([resource, resourceId])
+  @@index([actorId, createdAt(sort: Desc)])
+}
+
+model OutboxEvent {
+  id            String       @id @default(uuid()) @db.Uuid
+  aggregateType String
+  aggregateId   String
+  eventType     String
+  payload       Json
+  status        OutboxStatus @default(PENDING)
+  createdAt     DateTime     @default(now())
+  publishedAt   DateTime?
+  lastError     String?      @db.Text
+  retryCount    Int          @default(0)
+
+  @@index([status, createdAt])
+  @@index([aggregateType, aggregateId])
+}
+
+// ---------------------------------------------------------------------------
+// CMS & SEO CONTENT MODULE (Blogs, Videos, FAQs)
+// ---------------------------------------------------------------------------
+
+model BlogPost {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @db.Uuid
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  title          String
+  slug           String
+  content        String    @db.Text
+  excerpt        String?
+  thumbnailUrl   String?
+  category       String
+  tags           String[]  @default([])
+  authorId       String?   @db.Uuid
+  author         User?     @relation("BlogAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  publishedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  
+  @@unique([tenantId, slug])
+  @@index([tenantId, publishedAt])
+}
+
+model Video {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @db.Uuid
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  title          String
+  youtubeUrl     String    
+  thumbnailUrl   String?
+  duration       Int?      // in seconds
+  description    String?   @db.Text
+  category       String?   
+  createdAt      DateTime  @default(now())
+  
+  @@unique([tenantId, youtubeUrl])
+}
+
+model Faq {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @db.Uuid
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  makeId         String?   @db.Uuid
+  make           VehicleMake? @relation(fields: [makeId], references: [id], onDelete: Cascade)
+  question       String
+  answer         String    @db.Text
+  sortOrder      Int       @default(0)
+  createdAt      DateTime  @default(now())
+  
+  @@index([tenantId, makeId, sortOrder])
+}
+
+// ---------------------------------------------------------------------------
+// DEALS, OFFERS & MESSAGING MODULE
+// ---------------------------------------------------------------------------
+
+enum DealType {
+  CASHBACK
+  LOW_APR
+  LEASE
+  EMPLOYEE_PRICE
+  LOYALTY
+}
+
+enum OfferStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  COUNTERED
+  WITHDRAWN
+}
+
+model Deal {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @db.Uuid
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listingId      String    @db.Uuid
+  listing        Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  
+  title          String    
+  dealType       DealType
+  badgeText      String?   
+  
+  savingsAmount  Decimal?  @db.Decimal(12, 2)
+  apr            Decimal?  @db.Decimal(5, 2)  
+  monthlyPayment Decimal?  @db.Decimal(12, 2) 
+  monthsTerm     Int?      
+  
+  description    String?   @db.Text
+  expiresAt      DateTime?
+  
+  createdAt      DateTime  @default(now())
+  
+  @@index([tenantId, dealType])
+  @@index([listingId])
+}
+
+model Offer {
+  id             String      @id @default(uuid()) @db.Uuid
+  tenantId       String      @db.Uuid
+  tenant         Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  listingId      String      @db.Uuid
+  listing        Listing     @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  buyerId        String      @db.Uuid
+  buyer          User        @relation("OfferBuyer", fields: [buyerId], references: [id], onDelete: Restrict)
+  
+  amount         Decimal     @db.Decimal(12, 2)
+  status         OfferStatus @default(PENDING)
+  messageText    String?     @db.Text
+  
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  
+  @@index([tenantId, buyerId])
+  @@index([listingId])
+}
+
+model Conversation {
+  id             String    @id @default(uuid()) @db.Uuid
+  tenantId       String    @db.Uuid
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  p1Id           String    @db.Uuid
+  participant1   User      @relation("ConversationP1", fields: [p1Id], references: [id], onDelete: Restrict)
+  p2Id           String    @db.Uuid
+  participant2   User      @relation("ConversationP2", fields: [p2Id], references: [id], onDelete: Restrict)
+  
+  listingId      String?   @db.Uuid
+  listing        Listing?  @relation(fields: [listingId], references: [id], onDelete: SetNull)
+  
+  messages       Message[]
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([p1Id, p2Id, listingId])
+  @@index([tenantId])
+}
+
+model Message {
+  id             String       @id @default(uuid()) @db.Uuid
+  conversationId String       @db.Uuid
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  
+  senderId       String       @db.Uuid
+  sender         User         @relation("MessageSender", fields: [senderId], references: [id], onDelete: Restrict)
+  receiverId     String       @db.Uuid
+  receiver       User         @relation("MessageReceiver", fields: [receiverId], references: [id], onDelete: Restrict)
+  
+  content        String       @db.Text
+  isRead         Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  
+  @@index([conversationId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// REVIEWS & RATINGS MODULE
+// ---------------------------------------------------------------------------
+
+model DealerReview {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  dealerId  String   @db.Uuid
+  dealer    Dealer   @relation(fields: [dealerId], references: [id], onDelete: Cascade)
+  
+  authorId  String   @db.Uuid
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  
+  rating    Int      @default(5) // 1-5
+  comment   String?  @db.Text
+  
+  isVerified Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([dealerId, rating])
+  @@index([tenantId])
+}
+
+model VehicleReview {
+  id               String         @id @default(uuid()) @db.Uuid
+  tenantId         String         @db.Uuid
+  tenant           Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  vehicleVariantId String         @db.Uuid
+  vehicleVariant   VehicleVariant @relation(fields: [vehicleVariantId], references: [id], onDelete: Cascade)
+  
+  authorId         String         @db.Uuid
+  author           User           @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  
+  rating           Int            @default(5)
+  title            String?
+  comment          String?        @db.Text
+  
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([vehicleVariantId, rating])
+  @@index([tenantId])
+}
+
+model ListingReview {
+  id        String   @id @default(uuid()) @db.Uuid
+  tenantId  String   @db.Uuid
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  
+  listingId String   @db.Uuid
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  
+  authorId  String   @db.Uuid
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  
+  rating    Int      @default(5)
+  comment   String?  @db.Text
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([listingId])
+}
+
+model VehicleFeature {
+  id               String         @id @default(uuid()) @db.Uuid
+  vehicleVariantId String         @db.Uuid
+  vehicleVariant   VehicleVariant @relation(fields: [vehicleVariantId], references: [id], onDelete: Cascade)
+  
+  name             String
+  groupName        String       // e.g. Safety, Technology, Comfort
+  isKeyHighlight   Boolean      @default(false)
+  description      String?      @db.Text
+  
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@index([vehicleVariantId, groupName])
+}
+
+model VehicleWarranty {
+  id               String         @id @default(uuid()) @db.Uuid
+  vehicleVariantId String         @unique @db.Uuid
+  vehicleVariant   VehicleVariant @relation(fields: [vehicleVariantId], references: [id], onDelete: Cascade)
+  
+  basic            String?      // e.g. 3 years or 36,000 miles
+  drivetrain       String?      // e.g. 5 years or 60,000 miles
+  corrosion        String?
+  roadside         String?
+  maintenance      String?      // Free maintenance details
+  
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+}

@@ -23,7 +23,22 @@
 
 ## Description
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+Drive Style / Carea marketplace **MVP API**: NestJS, Prisma, PostgreSQL, JWT auth with refresh tokens, RBAC, listings CRUD with transactional outbox events, read APIs for the vehicle directory and new-car showcase rails.
+
+### Local setup
+
+1. Copy `.env.example` to `.env` and set `DATABASE_URL`, `JWT_ACCESS_SECRET`, and `JWT_REFRESH_SECRET`.
+2. Apply schema and seed roles/tenant: `npx prisma migrate deploy` (or `npm run prisma:migrate` for development), then `npm run prisma:seed`.
+3. Run the API: `npm run start:dev`.
+4. Health check: `GET http://localhost:3000/health` (outside the `/api/v1` prefix). JSON API: `http://localhost:3000/api/v1`.
+
+**Swagger UI:** `http://localhost:3000/api/v1/docs` — click **Authorize**, use `Bearer <accessToken>` from `POST /auth/login`. After `npm run prisma:seed`, sign in as **demo@example.com** / **Demo123!** (buyer) or **dealer@example.com** / **Dealer123!** (dealer).
+
+**Vehicle verticals:** `VehicleModel.category` and `Listing.vehicleCategory` use enum `VehicleCategory` (`CAR`, `MOTORCYCLE`, `TRUCK`, `VAN`, `OTHER`). Add bike/truck models under the same directory tree with the right category; filter `GET /vehicle-directory/makes?category=MOTORCYCLE` and `GET /listings?vehicleCategory=TRUCK`.
+
+After seed, **Harley-Davidson → Sportster S** (`MOTORCYCLE`) and a sample listing `seed-2023-hd-sportster-s` are included so you can try those filters in Swagger without manual data entry.
+
+End-to-end tests (`npm run test:e2e`) expect a reachable PostgreSQL database and a seeded tenant/roles (same as step 2).
 
 ## Project setup
 
