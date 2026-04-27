@@ -184,8 +184,12 @@ model User {
   email        String     @unique
   passwordHash String?
   displayName  String?
+  firstName    String?
+  lastName     String?
   phone        String?
   avatarUrl    String?
+  bio          String?    @db.Text
+  location     String?
   status       UserStatus @default(ACTIVE)
   emailVerifiedAt DateTime?
   lastLoginAt  DateTime?
@@ -215,12 +219,114 @@ model User {
   conversationsAsP1 Conversation[]     @relation("ConversationP1")
   conversationsAsP2 Conversation[]     @relation("ConversationP2")
 
-  dealerReviewsWritten DealerReview[]
+  dealerReviewsWritten  DealerReview[]
   vehicleReviewsWritten VehicleReview[]
   listingReviewsWritten ListingReview[]
 
+  favorites           UserFavorite[]
+  notifications       Notification[]
+  settings            UserSettings?
+  passwordResetTokens PasswordResetToken[]
+
   @@index([tenantId])
   @@index([createdAt, id])
+}
+
+// ---------------------------------------------------------------------------
+// User Favorites (saved listings)
+// ---------------------------------------------------------------------------
+
+model UserFavorite {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listingId String   @db.Uuid
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, listingId])
+  @@index([userId])
+  @@index([listingId])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications
+// ---------------------------------------------------------------------------
+
+enum NotificationType {
+  OFFER
+  PRICE_DROP
+  MESSAGE
+  MATCH
+  SYSTEM
+}
+
+model Notification {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @db.Uuid
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType @default(SYSTEM)
+  title     String
+  message   String           @db.Text
+  isRead    Boolean          @default(false)
+  metadata  Json?
+  createdAt DateTime         @default(now())
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+// ---------------------------------------------------------------------------
+// User Settings & Preferences
+// ---------------------------------------------------------------------------
+
+model UserSettings {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @unique @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  darkMode Boolean @default(false)
+  language String  @default("en")
+  currency String  @default("USD") @db.Char(3)
+
+  emailNotifications Boolean @default(true)
+  pushNotifications  Boolean @default(true)
+  priceDropAlerts    Boolean @default(true)
+  newListingMatches  Boolean @default(false)
+  marketingEmails    Boolean @default(false)
+
+  showProfileToDealers Boolean @default(true)
+  showSearchHistory    Boolean @default(true)
+  shareUsageData       Boolean @default(false)
+
+  updatedAt DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Password Reset
+// ---------------------------------------------------------------------------
+
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Newsletter
+// ---------------------------------------------------------------------------
+
+model NewsletterSubscriber {
+  id               String    @id @default(uuid()) @db.Uuid
+  email            String    @unique
+  subscribedAt     DateTime  @default(now())
+  unsubscribedAt   DateTime?
 }
 
 model Role {
@@ -537,6 +643,11 @@ model Listing {
   slug        String
   description String? @db.Text
 
+  // --- Identity (for free-form used ads) ---
+  make    String?
+  model   String?
+  variant String?
+
   /// Denormalized from directory model when variant linked; else set on create (USED free-form).
   vehicleCategory VehicleCategory @default(CAR)
 
@@ -552,6 +663,9 @@ model Listing {
   transmission  TransmissionType?
   bodyType      BodyType?
   drivetrain    DrivetrainType?
+
+  engine        String?
+  horsepower    Int?
 
   exteriorColor String?
   interiorColor String?
@@ -576,6 +690,11 @@ model Listing {
   latitude    Decimal? @db.Decimal(10, 7)
   longitude   Decimal? @db.Decimal(10, 7)
 
+  // --- Private Seller Contact Overrides ---
+  contactName  String?
+  contactPhone String?
+  contactEmail String?
+
   publishedAt DateTime?
   expiresAt   DateTime?
 
@@ -594,10 +713,11 @@ model Listing {
   boosts       ListingBoost[]
   stats        ListingStats?
 
-  deals        Deal[]
-  offers       Offer[]
+  deals         Deal[]
+  offers        Offer[]
   conversations Conversation[]
   reviews       ListingReview[]
+  favorites     UserFavorite[]
 
   @@unique([tenantId, slug])
   @@index([tenantId, status, publishedAt(sort: Desc), id(sort: Asc)])

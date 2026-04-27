@@ -84,16 +84,16 @@ export class ListingsService {
       deletedAt: null,
       status: ListingStatus.PUBLISHED,
     };
-    // --- General Filters ---
+
+    // --- Status / Kind / Category ---
     if (query.kind) where.kind = query.kind;
     if (query.vehicleCategory) where.vehicleCategory = query.vehicleCategory;
-    if (query.city) where.city = query.city;
-    if (query.region) where.region = query.region;
-    if (query.year) where.year = query.year;
-    if (query.fuel) where.fuel = query.fuel as any;
-    if (query.transmission) where.transmission = query.transmission as any;
-    if (query.bodyType) where.bodyType = query.bodyType as any;
-    if (query.drivetrain) where.drivetrain = query.drivetrain as any;
+    if (query.sellerType) where.sellerType = query.sellerType;
+
+    // --- Dealer Verification ---
+    if (query.verifiedOnly) {
+      where.dealer = { verified: true };
+    }
 
     // --- Search Term (Title/Description) ---
     if (query.q) {
@@ -103,9 +103,10 @@ export class ListingsService {
       ];
     }
 
-    // --- Brand/Model (Nested Filters) ---
-    if (query.make || query.model) {
+    // --- Vehicle Identity ---
+    if (query.make || query.model || query.variant) {
       where.vehicleVariant = {
+        ...(query.variant && { name: { contains: query.variant, mode: 'insensitive' } }),
         generation: {
           model: {
             ...(query.model && { slug: query.model }),
@@ -116,28 +117,52 @@ export class ListingsService {
                   { name: { contains: query.make, mode: 'insensitive' } },
                 ],
               },
-             }),
+            }),
           },
         },
       };
     }
 
-    if (query.minPrice != null || query.maxPrice != null) {
-      where.priceAmount = {};
-      if (query.minPrice != null) {
-        where.priceAmount = {
-          ...where.priceAmount,
-          gte: new Prisma.Decimal(query.minPrice),
-        };
-      }
-      if (query.maxPrice != null) {
-        where.priceAmount = {
-          ...where.priceAmount,
-          lte: new Prisma.Decimal(query.maxPrice),
-        };
+    // --- Year Range ---
+    if (query.year != null || query.yearMin != null || query.yearMax != null) {
+      where.year = {};
+      if (query.year != null) where.year.equals = query.year;
+      else {
+        if (query.yearMin != null) where.year.gte = query.yearMin;
+        if (query.yearMax != null) where.year.lte = query.yearMax;
       }
     }
 
+    // --- Price Range ---
+    if (query.minPrice != null || query.maxPrice != null) {
+      where.priceAmount = {};
+      if (query.minPrice != null) where.priceAmount.gte = new Prisma.Decimal(query.minPrice);
+      if (query.maxPrice != null) where.priceAmount.lte = new Prisma.Decimal(query.maxPrice);
+    }
+
+    // --- Mileage ---
+    if (query.mileageMax != null) {
+      where.mileage = { lte: query.mileageMax };
+    }
+
+    // --- Horsepower ---
+    if (query.hpMin != null || query.hpMax != null) {
+      where.horsepower = {};
+      if (query.hpMin != null) where.horsepower.gte = query.hpMin;
+      if (query.hpMax != null) where.horsepower.lte = query.hpMax;
+    }
+
+    // --- Other Specs ---
+    if (query.fuel) where.fuel = query.fuel;
+    if (query.transmission) where.transmission = query.transmission;
+    if (query.bodyType) where.bodyType = query.bodyType;
+    if (query.drivetrain) where.drivetrain = query.drivetrain;
+    if (query.exteriorColor) where.exteriorColor = { contains: query.exteriorColor, mode: 'insensitive' };
+    if (query.seats) where.seats = { gte: query.seats };
+    if (query.city) where.city = { contains: query.city, mode: 'insensitive' };
+    if (query.region) where.region = { contains: query.region, mode: 'insensitive' };
+
+    // --- Cursor Pagination ---
     if (cursorRow) {
       where.AND = [
         {
@@ -153,10 +178,11 @@ export class ListingsService {
         },
       ];
     }
-    // --- Radius Search (Bounding Box) ---
+
+    // --- Radius Search ---
     if (query.lat != null && query.lng != null) {
-      const radius = query.radius ?? 50; // Default 50km
-      const degLat = radius / 111.32; // Latitude: 1 deg ~ 111.32 km
+      const radius = query.radius ?? 50;
+      const degLat = radius / 111.32;
       const degLng = radius / (111.32 * Math.cos(query.lat * (Math.PI / 180)));
 
       where.latitude = {
@@ -169,13 +195,28 @@ export class ListingsService {
       };
     }
 
+    // --- Sorting ---
+    const orderBy: Prisma.ListingOrderByWithRelationInput[] = [];
+    switch (query.sort) {
+      case 'price-low': orderBy.push({ priceAmount: 'asc' }); break;
+      case 'price-high': orderBy.push({ priceAmount: 'desc' }); break;
+      case 'year': orderBy.push({ year: 'desc' }); break;
+      case 'mileage-low': orderBy.push({ mileage: 'asc' }); break;
+      case 'rating': orderBy.push({ dealer: { reviews: { _count: 'desc' } } }); break; // Simplistic
+      case 'newest':
+      default:
+        orderBy.push({ publishedAt: 'desc' });
+        orderBy.push({ id: 'desc' });
+    }
+
     const rows = await this.prisma.listing.findMany({
       where,
       take: limit + 1,
-      orderBy: [{ publishedAt: 'desc' }, { id: 'desc' }],
+      orderBy,
       include: {
         media: { orderBy: { sortOrder: 'asc' }, take: 5 },
         stats: true,
+        dealer: { select: { verified: true, businessName: true } },
       },
     });
 
@@ -204,7 +245,10 @@ export class ListingsService {
         deletedAt: null,
         status: ListingStatus.PUBLISHED,
       },
-      include: listingInclude,
+      include: {
+        ...listingInclude,
+        dealer: { include: { reviews: { take: 5, orderBy: { createdAt: 'desc' } } } },
+      },
     });
     if (!listing) throw new NotFoundException('Listing not found');
     return this.serialize(listing);
@@ -219,7 +263,10 @@ export class ListingsService {
         deletedAt: null,
         status: ListingStatus.PUBLISHED,
       },
-      include: listingInclude,
+      include: {
+        ...listingInclude,
+        dealer: { include: { reviews: { take: 5, orderBy: { createdAt: 'desc' } } } },
+      },
     });
     if (!listing) throw new NotFoundException('Listing not found');
     return this.serialize(listing);
@@ -228,7 +275,10 @@ export class ListingsService {
   private async loadListing(id: string) {
     const listing = await this.prisma.listing.findFirst({
       where: { id, deletedAt: null },
-      include: listingInclude,
+      include: {
+        ...listingInclude,
+        dealer: true,
+      },
     });
     if (!listing) throw new NotFoundException('Listing not found');
     return this.serialize(listing);
@@ -278,11 +328,17 @@ export class ListingsService {
           description: dto.description,
           vehicleCategory,
           priceAmount: new Prisma.Decimal(dto.priceAmount),
+          originalPrice: dto.originalPrice ? new Prisma.Decimal(dto.originalPrice) : null,
           currency: dto.currency ?? 'USD',
           vehicleVariantId: dto.vehicleVariantId ?? null,
           vehicleSpecVersionId: dto.vehicleSpecVersionId ?? null,
+          make: dto.make,
+          model: dto.model,
+          variant: dto.variant,
           year: dto.year ?? null,
           mileage: dto.mileage ?? null,
+          engine: dto.engine,
+          horsepower: dto.horsepower,
           conditionNote: dto.conditionNote ?? null,
           fuel: dto.fuel ?? null,
           transmission: dto.transmission ?? null,
@@ -303,10 +359,11 @@ export class ListingsService {
           region: dto.region ?? null,
           countryCode: dto.countryCode ?? null,
           postalCode: dto.postalCode ?? null,
-          latitude:
-            dto.latitude != null ? new Prisma.Decimal(dto.latitude) : null,
-          longitude:
-            dto.longitude != null ? new Prisma.Decimal(dto.longitude) : null,
+          latitude: dto.latitude != null ? new Prisma.Decimal(dto.latitude) : null,
+          longitude: dto.longitude != null ? new Prisma.Decimal(dto.longitude) : null,
+          contactName: dto.contactName,
+          contactPhone: dto.contactPhone,
+          contactEmail: dto.contactEmail,
           publishedAt,
           stats: { create: {} },
           media: {
@@ -392,6 +449,9 @@ export class ListingsService {
       ...(dto.priceAmount != null && {
         priceAmount: new Prisma.Decimal(dto.priceAmount),
       }),
+      ...(dto.originalPrice !== undefined && {
+        originalPrice: dto.originalPrice ? new Prisma.Decimal(dto.originalPrice) : null,
+      }),
       ...(dto.currency != null && { currency: dto.currency }),
       ...(dto.kind != null && { kind: dto.kind }),
       ...(dto.status != null && { status: dto.status }),
@@ -402,8 +462,13 @@ export class ListingsService {
         vehicleSpecVersionId: dto.vehicleSpecVersionId,
       }),
       vehicleCategory,
+      ...(dto.make !== undefined && { make: dto.make }),
+      ...(dto.model !== undefined && { model: dto.model }),
+      ...(dto.variant !== undefined && { variant: dto.variant }),
       ...(dto.year !== undefined && { year: dto.year }),
       ...(dto.mileage !== undefined && { mileage: dto.mileage }),
+      ...(dto.engine !== undefined && { engine: dto.engine }),
+      ...(dto.horsepower !== undefined && { horsepower: dto.horsepower }),
       ...(dto.conditionNote !== undefined && { conditionNote: dto.conditionNote }),
       ...(dto.fuel !== undefined && { fuel: dto.fuel }),
       ...(dto.transmission !== undefined && { transmission: dto.transmission }),
@@ -439,6 +504,9 @@ export class ListingsService {
         longitude:
           dto.longitude != null ? new Prisma.Decimal(dto.longitude) : null,
       }),
+      ...(dto.contactName !== undefined && { contactName: dto.contactName }),
+      ...(dto.contactPhone !== undefined && { contactPhone: dto.contactPhone }),
+      ...(dto.contactEmail !== undefined && { contactEmail: dto.contactEmail }),
       sellerType,
       dealer: dealerId
         ? { connect: { id: dealerId } }
@@ -527,6 +595,8 @@ export class ListingsService {
         type: listing.sellerType,
         userId: listing.ownerUserId,
         dealerId: listing.dealerId,
+        dealerName: listing.dealer?.businessName,
+        isVerifiedDealer: listing.dealer?.verified || false,
       },
 
       pricing: {
@@ -539,6 +609,9 @@ export class ListingsService {
       vehicle: {
         category: listing.vehicleCategory,
         year: listing.year,
+        make: listing.make,
+        model: listing.model,
+        variant: listing.variant,
 
         variantId: listing.vehicleVariantId,
         specVersionId: listing.vehicleSpecVersionId,
@@ -548,6 +621,8 @@ export class ListingsService {
           transmission: listing.transmission,
           bodyType: listing.bodyType,
           drivetrain: listing.drivetrain,
+          engine: listing.engine,
+          horsepower: listing.horsepower,
           seats: listing.seats,
         },
 
@@ -577,6 +652,12 @@ export class ListingsService {
           latitude: listing.latitude ? Number(listing.latitude) : null,
           longitude: listing.longitude ? Number(listing.longitude) : null,
         },
+      },
+
+      contact: {
+        name: listing.contactName,
+        phone: listing.contactPhone,
+        email: listing.contactEmail,
       },
 
       media: listing.media || [],

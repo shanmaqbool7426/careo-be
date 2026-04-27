@@ -59,6 +59,9 @@ export class AuthService {
         email: dto.email.toLowerCase(),
         passwordHash,
         displayName: dto.displayName,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        phone: dto.phone,
         tenantId,
         roles: {
           create: {
@@ -118,6 +121,17 @@ export class AuthService {
       data: { revokedAt: new Date() },
     });
     return { ok: true };
+  }
+
+  async updateProfile(id: string, dto: any) {
+    return this.prisma.user.update({
+      where: { id },
+      data: {
+        displayName: dto.displayName,
+        phone: dto.phone,
+        avatarUrl: dto.avatarUrl,
+      },
+    });
   }
 
   private async issueTokens(userId: string, email: string) {

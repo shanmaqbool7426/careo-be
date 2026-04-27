@@ -331,7 +331,6 @@ paket-files/
 *.sln.iml
 
 # IDE - VSCode
-.vscode/*
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
@@ -394,7 +393,10 @@ Temporary Items
 
 =======
 # Local
-.env
 dist
 .webpack
 .serverless/**/*.zip
+temp_auto_push.bat
+temp_interactive_push.bat
+branch_structure.json
+config.bat
