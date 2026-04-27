@@ -1,6 +1,7 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import { Body, Controller, HttpCode, HttpStatus, Post, Patch } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Public } from '../common/decorators/public.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
@@ -38,5 +39,11 @@ export class AuthController {
   @ApiOperation({ summary: 'Revoke refresh token' })
   logout(@Body() dto: RefreshDto) {
     return this.auth.logout(dto);
+  }
+
+  @Patch('profile')
+  @ApiOperation({ summary: 'Update your profile information' })
+  updateProfile(@CurrentUser() user: any, @Body() dto: any) {
+     return this.auth.updateProfile(user.id, dto);
   }
 }

@@ -16,6 +16,7 @@ import { MessagingModule } from './messaging/messaging.module';
 import { ReviewsModule } from './reviews/reviews.module';
 import { DealersModule } from './dealers/dealers.module';
 import { MediaModule } from './media/media.module';
+import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { MediaModule } from './media/media.module';
     ReviewsModule,
     DealersModule,
     MediaModule,
+    UsersModule,
   ],
   providers: [
     {
